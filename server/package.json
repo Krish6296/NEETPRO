@@ -11,6 +11,7 @@
     "db:generate": "prisma generate",
     "db:diff": "prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script",
     "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {

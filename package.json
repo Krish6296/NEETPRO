@@ -11,6 +11,7 @@
     "typecheck": "npm run typecheck --workspace server && npm run typecheck --workspace client",
     "db:generate": "npm run db:generate --workspace server",
     "db:migrate": "npm run db:migrate --workspace server",
+    "db:deploy": "npm run db:deploy --workspace server",
     "db:seed": "npm run db:seed --workspace server"
   },
   "devDependencies": {

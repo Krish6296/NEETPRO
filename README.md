@@ -29,7 +29,9 @@ Requirements: Node.js 20+ and PostgreSQL.
    `JWT_SECRET`. `CLIENT_ORIGIN` and `PORT` are optional.
 2. Install dependencies with `npm install`.
 3. Generate Prisma Client with `npm run db:generate`.
-4. Apply the checked-in migrations with `npm run db:migrate`.
+4. Apply the checked-in migrations in development with `npm run db:migrate`.
+   For a deployed Supabase database, use `npm run db:deploy` to apply
+   migrations without creating a development migration.
 5. Add demo data with `npm run db:seed`. It creates an admin at `ADMIN_PHONE`
    (default `+15550000001`), 360 illustrative sample questions, and two
    balanced 180-question full mock tests (45 Physics, 45 Chemistry, 90 Biology).
