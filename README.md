@@ -64,6 +64,13 @@ Do not run `npm run db:seed` against a live student database: its generated
 questions are illustrative demonstration content, not curated exam-preparation
 material.
 
+## Supabase MCP and agent skills
+
+The VS Code MCP server configuration for the NEETPRO Supabase project is in
+`.vscode/mcp.json`. Reload VS Code or refresh MCP servers, then authorize
+Supabase when prompted. Optional Supabase agent skills can be installed with
+`npx skills add supabase/agent-skills`.
+
 ## Study tools and offline practice
 
 Students can create daily study sessions, set a study-time goal, and track
