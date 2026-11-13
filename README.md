@@ -8,25 +8,17 @@ workspaces monorepo.
 ```text
 client/       React, Vite, Tailwind CSS student/admin application
 server/       Express API and Prisma database schema, seed, and migrations
-mockbangla/   Supabase schema, Bengali seed data, and protected admin API
-mockbangla-react/  Standalone React + Vite MockBangla student application
+api/          Vercel serverless entry point for the Express API
 ```
-
-## MockBangla
-
-MockBangla is a standalone React/Vite student app. Its Supabase migration,
-100-question Bengali seed, and protected admin Edge Function are in
-[mockbangla/](./mockbangla). Read [mockbangla-react/README.md](./mockbangla-react/README.md)
-for setup. Start the student app with `npm run dev:mockbangla`, build it with
-`npm run build:mockbangla`, or typecheck all workspace apps with
-`npm run typecheck`. The existing NEET Pro app and API remain unchanged.
 
 ## Setup
 
 Requirements: Node.js 20+ and PostgreSQL.
 
-1. Copy `.env.example` to `.env`. Set `DATABASE_URL` and a long random
-   `JWT_SECRET`. `CLIENT_ORIGIN` and `PORT` are optional.
+1. Copy `.env.example` to `.env`. Set `DATABASE_URL` to the Supabase pooled
+   connection string, `DIRECT_URL` to the direct database connection string,
+   and `JWT_SECRET` to a long random value. `CLIENT_ORIGIN` and `PORT` are
+   optional for local development.
 2. Install dependencies with `npm install`.
 3. Generate Prisma Client with `npm run db:generate`.
 4. Apply the checked-in migrations in development with `npm run db:migrate`.
@@ -51,8 +43,26 @@ key through a `VITE_` variable. Image uploads are limited to JPEG, PNG, and
 WebP files up to 5 MB; without storage credentials, the API reports that image
 storage is unavailable while question text and URL references continue to work.
 
-The migration has been generated from the Prisma schema; it has not been
-applied to a database as part of this source change.
+## Supabase and Vercel deployment
+
+1. Create a Supabase project. In **Authentication → Providers**, enable Phone
+   and configure an SMS provider; production OTP uses Supabase Auth.
+2. Set `DATABASE_URL` to the Supavisor transaction-pooler URL for application
+   requests and `DIRECT_URL` to the direct database URL for Prisma migrations.
+   Set `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `JWT_SECRET` in Vercel. Add
+   `SUPABASE_SERVICE_ROLE_KEY` only if image uploads are needed. Keep all of
+   these as server environment variables—never `VITE_` variables.
+3. Import `Krish6296/NEETPRO` into Vercel with the repository root as the
+   project root. `vercel.json` configures the Vite output and a serverless
+   Express API. The build generates Prisma Client before building the app.
+4. After setting the production environment variables, apply schema migrations
+   with `npm run db:deploy` using the configured `DIRECT_URL`.
+5. Set `CLIENT_ORIGIN` to the production site origin when using a custom domain;
+   Vercel preview and project domains are allowed automatically.
+
+Do not run `npm run db:seed` against a live student database: its generated
+questions are illustrative demonstration content, not curated exam-preparation
+material.
 
 ## Study tools and offline practice
 
@@ -77,9 +87,12 @@ All `/api` endpoints except `/api/health` and the OTP request/verify endpoints
 require `Authorization: Bearer <token>`. In non-production environments,
 `POST /api/auth/otp/request` returns the configured `DEMO_OTP` (default
 `123456`) so the app can be tested without SMS. This response explicitly marks
-the OTP as demo-only. OTP request is disabled in production until an SMS
-provider is configured; do not expose demo OTP behavior in a production build.
-The seed creates a demo admin phone; sign in using the same OTP flow.
+the OTP as demo-only. In production, the API sends and verifies OTPs through
+Supabase Auth; configure Phone Auth and an SMS provider in the Supabase
+dashboard, and set `SUPABASE_URL` plus `SUPABASE_ANON_KEY`. The API issues its
+app JWT only after Supabase verifies the phone. The seed creates
+a demo admin phone; set `ADMIN_PHONE` to the intended administrator before
+seeding a non-production database.
 
 ## API contracts
 

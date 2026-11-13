@@ -31,12 +31,24 @@ const jwtSecret = process.env.JWT_SECRET ?? (process.env.NODE_ENV === "productio
 const demoOtp = process.env.DEMO_OTP ?? "123456";
 const otpTtlSeconds = 5 * 60;
 const pageSizeMax = 100;
+const vercelOrigins = [
+  process.env.VERCEL_URL,
+  process.env.VERCEL_BRANCH_URL,
+  process.env.VERCEL_PROJECT_PRODUCTION_URL,
+].filter((origin): origin is string => Boolean(origin))
+  .map((origin) => origin.startsWith("http") ? origin : `https://${origin}`);
+const allowedClientOrigins = new Set([
+  ...(process.env.CLIENT_ORIGIN ?? "http://localhost:5173").split(","),
+  ...vercelOrigins,
+].map((origin) => origin.trim().replace(/\/+$/, "")).filter(Boolean));
 
 if (process.env.NODE_ENV === "production" && !jwtSecret) {
   throw new Error("JWT_SECRET must be configured in production");
 }
 
-app.use(cors({ origin: process.env.CLIENT_ORIGIN ?? "http://localhost:5173" }));
+app.use(cors({
+  origin: (origin, callback) => callback(null, !origin || allowedClientOrigins.has(origin)),
+}));
 app.use(express.json({ limit: "1mb" }));
 
 type AuthUser = { id: string; phone: string; role: "STUDENT" | "ADMIN"; isBlocked: boolean };
@@ -96,6 +108,13 @@ function safeUser(user: AuthUser | { id: string; phone: string; role: string; is
 
 function hashOtp(phone: string, code: string) {
   return createHash("sha256").update(`${process.env.OTP_SECRET ?? jwtSecret}:${phone}:${code}`).digest("hex");
+}
+
+function supabaseAuthSettings() {
+  const url = process.env.SUPABASE_URL?.replace(/\/+$/, "");
+  const anonKey = process.env.SUPABASE_ANON_KEY;
+  if (!url || !anonKey) fail(503, "OTP_PROVIDER_UNAVAILABLE", "Configure SUPABASE_URL and SUPABASE_ANON_KEY to send production OTPs");
+  return { url, anonKey };
 }
 
 function equalHash(left: string, right: string) {
@@ -252,13 +271,27 @@ app.get("/api/health", async (_request, response) => {
 app.post("/api/auth/otp/request", async (request, response) => {
   const phone = text(object(request.body).phone, "phone", 30);
   if (!/^\+?[1-9]\d{7,14}$/.test(phone)) fail(400, "VALIDATION_ERROR", "phone must be a valid international phone number");
-  if (process.env.NODE_ENV === "production") fail(503, "OTP_PROVIDER_UNAVAILABLE", "No production SMS provider is configured");
+  const production = process.env.NODE_ENV === "production";
+  const supabase = production ? supabaseAuthSettings() : null;
   const user = await prisma.user.findUnique({ where: { phone }, select: { id: true, isBlocked: true } });
   if (user?.isBlocked) fail(403, "ACCOUNT_BLOCKED", "This account is blocked");
   const now = new Date();
   const recent = await prisma.otpChallenge.count({ where: { phone, createdAt: { gte: new Date(now.getTime() - 10 * 60 * 1000) } } });
   if (recent >= 5) fail(429, "OTP_RATE_LIMIT", "Too many OTP requests; try again later");
-  const code = process.env.DEMO_OTP ?? demoOtp;
+  if (supabase) {
+    const sent = await fetch(`${supabase.url}/auth/v1/otp`, {
+      method: "POST",
+      headers: {
+        apikey: supabase.anonKey,
+        Authorization: `Bearer ${supabase.anonKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ phone, create_user: true }),
+    });
+    if (sent.status === 429) fail(429, "OTP_RATE_LIMIT", "The SMS provider rate limit was reached; try again later");
+    if (!sent.ok) fail(502, "OTP_PROVIDER_ERROR", "Supabase Auth could not send a verification code");
+  }
+  const code = production ? randomBytes(32).toString("hex") : process.env.DEMO_OTP ?? demoOtp;
   const challenge = await prisma.otpChallenge.create({
     data: { phone, codeHash: hashOtp(phone, code), expiresAt: new Date(now.getTime() + otpTtlSeconds * 1000), userId: user?.id },
   });
@@ -266,9 +299,11 @@ app.post("/api/auth/otp/request", async (request, response) => {
     phone,
     challengeId: challenge.id,
     expiresInSeconds: otpTtlSeconds,
-    demoOtp: code,
-    demoOnly: true,
-    warning: "Development/testing only: OTP is returned in this response; configure an SMS provider before production.",
+    ...(production ? {} : {
+      demoOtp: code,
+      demoOnly: true,
+      warning: "Development/testing only: OTP is returned in this response; production uses Supabase Auth.",
+    }),
   });
 });
 
@@ -277,6 +312,50 @@ app.post("/api/auth/otp/verify", async (request, response) => {
   const phone = text(body.phone, "phone", 30);
   const code = text(body.code, "code", 12);
   const challengeId = body.challengeId === undefined ? undefined : text(body.challengeId, "challengeId", 100);
+  if (!/^\+?[1-9]\d{7,14}$/.test(phone)) fail(400, "VALIDATION_ERROR", "phone must be a valid international phone number");
+  if (process.env.NODE_ENV === "production") {
+    const challenge = await prisma.otpChallenge.findFirst({
+      where: { phone, ...(challengeId ? { id: challengeId } : {}), verifiedAt: null },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!challenge || challenge.expiresAt <= new Date() || challenge.attempts >= 5) {
+      fail(400, "INVALID_OTP", "OTP is invalid or expired");
+    }
+    const supabase = supabaseAuthSettings();
+    const verification = await fetch(`${supabase.url}/auth/v1/verify`, {
+      method: "POST",
+      headers: {
+        apikey: supabase.anonKey,
+        Authorization: `Bearer ${supabase.anonKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ phone, token: code, type: "sms" }),
+    });
+    if (!verification.ok) {
+      if (verification.status === 429) fail(429, "OTP_RATE_LIMIT", "The SMS provider rate limit was reached; try again later");
+      await prisma.otpChallenge.updateMany({
+        where: { id: challenge.id, attempts: { lt: 5 } },
+        data: { attempts: { increment: 1 } },
+      });
+      if (verification.status >= 500) fail(502, "OTP_PROVIDER_ERROR", "Supabase Auth could not verify the code");
+      fail(400, "INVALID_OTP", "OTP is invalid or expired");
+    }
+    const authSession = object(await verification.json());
+    const authUser = object(authSession.user);
+    if (authUser.phone !== phone) fail(400, "INVALID_OTP", "OTP is invalid or expired");
+    const user = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.otpChallenge.updateMany({
+        where: { id: challenge.id, verifiedAt: null, attempts: { lt: 5 }, expiresAt: { gt: new Date() } },
+        data: { verifiedAt: new Date(), attempts: { increment: 1 } },
+      });
+      if (claimed.count !== 1) fail(400, "INVALID_OTP", "OTP is invalid or expired");
+      return tx.user.upsert({ where: { phone }, create: { phone }, update: {} });
+    });
+    if (user.isBlocked) fail(403, "ACCOUNT_BLOCKED", "This account is blocked");
+    const token = jwt.sign({ role: user.role }, jwtSecret, { subject: user.id, expiresIn: (process.env.JWT_EXPIRES_IN ?? "7d") as SignOptions["expiresIn"] });
+    response.json({ token, user: safeUser(user) });
+    return;
+  }
   const challenge = await prisma.otpChallenge.findFirst({
     where: { phone, ...(challengeId ? { id: challengeId } : {}), verifiedAt: null },
     orderBy: { createdAt: "desc" },
@@ -841,15 +920,17 @@ app.use((error: ApiError, _request: Request, response: Response, _next: NextFunc
   });
 });
 
-const server = app.listen(port, () => {
-  console.log(`NEET Pro API listening on port ${port}`);
-});
+if (process.env.VERCEL !== "1") {
+  const server = app.listen(port, () => {
+    console.log(`NEET Pro API listening on port ${port}`);
+  });
 
-async function shutdown() {
-  server.close();
-  await prisma.$disconnect();
+  async function shutdown() {
+    server.close();
+    await prisma.$disconnect();
+  }
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 }
-process.on("SIGINT", () => void shutdown());
-process.on("SIGTERM", () => void shutdown());
 
 export { app, gradeAttempt, parseCsv };
